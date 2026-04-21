@@ -2,7 +2,7 @@ mod error;
 
 use crate::error::AppError;
 use crate::error::AppError::ProcessError;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use regex::Regex;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
@@ -20,50 +20,94 @@ struct Cli {
     #[clap(short = 'a', long, value_name = "ACTION")]
     action: Option<String>,
 
+    #[clap(
+        short = 'u',
+        long,
+        value_name = "UNIQUE_BY_FIELDS",
+        value_delimiter = ','
+    )]
+    unique: Vec<Field>,
+
     #[clap(last = true, value_name = "COMMAND", required=true, num_args(1..), value_delimiter = ' ')]
     command: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Field {
+    Iif,
+    Oif,
+    SrcIp,
+    DstIp,
+    SrcPort,
+    DstPort,
+    Proto,
+}
+
 #[derive(Debug, Default)]
 pub struct LogEntry {
-    pub iif: Option<String>,     // IN
-    pub oif: Option<String>,     // OUT
-    pub src_ip: Option<IpAddr>,  // SRC
-    pub dst_ip: Option<IpAddr>,  // DST
-    pub src_mac: Option<String>, // MACSRC
-    pub dst_mac: Option<String>, // MACDST
-    pub src_port: Option<u16>,   // SPT
-    pub dst_port: Option<u16>,   // DPT
-    pub proto: Option<String>,   // PROTO
-    pub uid: Option<u32>,        // UID
-    pub gid: Option<u32>,        // GID
+    pub iif: Option<String>,    // IN
+    pub oif: Option<String>,    // OUT
+    pub src_ip: Option<IpAddr>, // SRC
+    pub dst_ip: Option<IpAddr>, // DST
+    pub src_port: Option<u16>,  // SPT
+    pub dst_port: Option<u16>,  // DPT
+    pub proto: Option<String>,  // PROTO
+    pub uid: Option<u32>,       // UID
+    pub gid: Option<u32>,       // GID
 }
 
-impl std::hash::Hash for LogEntry {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.iif.hash(state);
-        self.oif.hash(state);
-        self.src_ip.hash(state);
-        self.dst_ip.hash(state);
-        self.src_port.hash(state);
-        self.dst_port.hash(state);
-        self.proto.hash(state);
+impl LogEntry {
+    fn key(&self, fields: &[Field]) -> LogKey {
+        LogKey {
+            iif: if fields.contains(&Field::Iif) {
+                self.iif.clone()
+            } else {
+                None
+            },
+            oif: if fields.contains(&Field::Oif) {
+                self.oif.clone()
+            } else {
+                None
+            },
+            src_ip: if fields.contains(&Field::SrcIp) {
+                self.src_ip
+            } else {
+                None
+            },
+            dst_ip: if fields.contains(&Field::DstIp) {
+                self.dst_ip
+            } else {
+                None
+            },
+            src_port: if fields.contains(&Field::SrcPort) {
+                self.src_port
+            } else {
+                None
+            },
+            dst_port: if fields.contains(&Field::DstPort) {
+                self.dst_port
+            } else {
+                None
+            },
+            proto: if fields.contains(&Field::Proto) {
+                self.proto.clone()
+            } else {
+                None
+            },
+        }
     }
 }
 
-impl PartialEq for LogEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.iif == other.iif
-            && self.oif == other.oif
-            && self.src_ip == other.src_ip
-            && self.dst_ip == other.dst_ip
-            && self.src_port == other.src_port
-            && self.dst_port == other.dst_port
-            && self.proto == other.proto
-    }
+#[derive(Debug, Default, Hash, Eq, PartialEq, Clone)]
+pub struct LogKey {
+    pub iif: Option<String>,    // IN
+    pub oif: Option<String>,    // OUT
+    pub src_ip: Option<IpAddr>, // SRC
+    pub dst_ip: Option<IpAddr>, // DST
+    pub src_port: Option<u16>,  // SPT
+    pub dst_port: Option<u16>,  // DPT
+    pub proto: Option<String>,  // PROTO
 }
-
-impl Eq for LogEntry {}
 
 impl LogEntry {
     pub fn to_nftables_rule(&self, action: &Option<String>) -> String {
@@ -177,8 +221,6 @@ fn parse_log_line(line: &str) -> Result<Option<LogEntry>, AppError> {
         oif: None,
         src_ip: None,
         dst_ip: None,
-        src_mac: None,
-        dst_mac: None,
         src_port: None,
         dst_port: None,
         proto: None,
@@ -206,7 +248,7 @@ fn parse_log_line(line: &str) -> Result<Option<LogEntry>, AppError> {
     }
 }
 
-fn output_rules(rules: &HashSet<LogEntry>, action: Option<String>) {
+fn output_rules(rules: &Vec<LogEntry>, action: Option<String>) {
     for rule in rules {
         println!("{}", rule.to_nftables_rule(&action));
     }
@@ -221,7 +263,8 @@ fn main() -> Result<(), error::AppError> {
         r.store(false, Ordering::SeqCst);
     })?;
 
-    let mut aggregated_rules: HashSet<LogEntry> = HashSet::new();
+    let mut seen: HashSet<LogKey> = HashSet::new();
+    let mut unique_entries: Vec<LogEntry> = Vec::new();
 
     println!("Press Ctrl+C to exit and output aggregated rules...\n");
     println!("Running command: {:?}", cli.command);
@@ -254,9 +297,13 @@ fn main() -> Result<(), error::AppError> {
 
         match line {
             Ok(line) => {
-                if regex.is_match(&line) {
-                    if let Some(entry) = parse_log_line(&line)? {
-                        aggregated_rules.insert(entry);
+                if !regex.is_match(&line) {
+                    continue;
+                }
+                if let Some(entry) = parse_log_line(&line)? {
+                    let key = entry.key(&cli.unique);
+                    if seen.insert(key) {
+                        unique_entries.push(entry);
                     }
                 }
             }
@@ -269,8 +316,8 @@ fn main() -> Result<(), error::AppError> {
 
     println!(
         "\n\n=== Aggregated Rules ({} unique) ===\n",
-        aggregated_rules.len()
+        unique_entries.len()
     );
-    output_rules(&aggregated_rules, cli.action);
+    output_rules(&unique_entries, cli.action);
     Ok(())
 }
