@@ -355,6 +355,7 @@ fn main() -> Result<(), error::AppError> {
                 if !regex.is_match(&line) {
                     continue;
                 }
+                println!("{}", line);
                 if let Some(entry) = parse_log_line(&line)? {
                     let key = entry.key(&unique_fields);
                     if seen.insert(key) {
