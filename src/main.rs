@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+type FieldSetter = Box<dyn Fn(&regex::Captures, &mut LogEntry)>;
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
@@ -212,62 +213,10 @@ impl LogEntry {
     }
 }
 
-fn parse_log_line(line: &str) -> Result<Option<LogEntry>, AppError> {
-    type FieldSetter = Box<dyn Fn(&regex::Captures, &mut LogEntry)>;
-
-    let patterns: Vec<(&str, FieldSetter)> = vec![
-        (
-            r"IN=([^\s]+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                entry.iif = Some(cap[1].to_string());
-            }),
-        ),
-        (
-            r" OUT=([^\s]+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                entry.oif = Some(cap[1].to_string());
-            }),
-        ),
-        (
-            r" SRC=([^\s]+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                if let Ok(ip) = cap[1].parse::<IpAddr>() {
-                    entry.src_ip = Some(ip);
-                }
-            }),
-        ),
-        (
-            r" DST=([^\s]+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                if let Ok(ip) = cap[1].parse::<IpAddr>() {
-                    entry.dst_ip = Some(ip);
-                }
-            }),
-        ),
-        (
-            r" SPT=(\d+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                if let Ok(port) = cap[1].parse::<u16>() {
-                    entry.src_port = Some(port);
-                }
-            }),
-        ),
-        (
-            r" DPT=(\d+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                if let Ok(port) = cap[1].parse::<u16>() {
-                    entry.dst_port = Some(port);
-                }
-            }),
-        ),
-        (
-            r" PROTO=([^\s]+)",
-            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
-                entry.proto = Some(cap[1].to_string());
-            }),
-        ),
-    ];
-
+fn parse_log_line(
+    line: &str,
+    patterns: &Vec<(Regex, FieldSetter)>,
+) -> Result<Option<LogEntry>, AppError> {
     let mut entry = LogEntry {
         iif: None,
         oif: None,
@@ -278,8 +227,7 @@ fn parse_log_line(line: &str) -> Result<Option<LogEntry>, AppError> {
         proto: None,
     };
 
-    for (pattern, setter) in patterns {
-        let re = Regex::new(pattern)?;
+    for (re, setter) in patterns {
         if let Some(caps) = re.captures(line) {
             setter(&caps, &mut entry);
         }
@@ -321,6 +269,58 @@ fn main() -> Result<(), error::AppError> {
     let mut seen: HashSet<LogKey> = HashSet::new();
     let mut unique_entries: Vec<LogEntry> = Vec::new();
 
+    let patterns: Vec<(Regex, FieldSetter)> = vec![
+        (
+            Regex::new(r"IN=([^\s]+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                entry.iif = Some(cap[1].to_string());
+            }),
+        ),
+        (
+            Regex::new(r" OUT=([^\s]+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                entry.oif = Some(cap[1].to_string());
+            }),
+        ),
+        (
+            Regex::new(r" SRC=([^\s]+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                if let Ok(ip) = cap[1].parse::<IpAddr>() {
+                    entry.src_ip = Some(ip);
+                }
+            }),
+        ),
+        (
+            Regex::new(r" DST=([^\s]+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                if let Ok(ip) = cap[1].parse::<IpAddr>() {
+                    entry.dst_ip = Some(ip);
+                }
+            }),
+        ),
+        (
+            Regex::new(r" SPT=(\d+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                if let Ok(port) = cap[1].parse::<u16>() {
+                    entry.src_port = Some(port);
+                }
+            }),
+        ),
+        (
+            Regex::new(r" DPT=(\d+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                if let Ok(port) = cap[1].parse::<u16>() {
+                    entry.dst_port = Some(port);
+                }
+            }),
+        ),
+        (
+            Regex::new(r" PROTO=([^\s]+)")?,
+            Box::new(|cap: &regex::Captures, entry: &mut LogEntry| {
+                entry.proto = Some(cap[1].to_string());
+            }),
+        ),
+    ];
     println!("Press Ctrl+C to exit and output aggregated rules...\n");
     println!("Running command: {:?}", cli.command);
     let (program, args) = cli
@@ -356,7 +356,7 @@ fn main() -> Result<(), error::AppError> {
                     continue;
                 }
                 println!("{}", line);
-                if let Some(entry) = parse_log_line(&line)? {
+                if let Some(entry) = parse_log_line(&line, &patterns)? {
                     let key = entry.key(&unique_fields);
                     if seen.insert(key) {
                         unique_entries.push(entry);
